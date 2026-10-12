@@ -1,0 +1,26 @@
+{
+  "name": "cinaywave-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "smoke": "node scripts/smoke.js"
+  },
+  "dependencies": {
+    "bcryptjs": "3.0.3",
+    "dotenv": "16.6.1",
+    "express": "5.2.1",
+    "express-rate-limit": "8.1.0",
+    "helmet": "8.1.0",
+    "jsonwebtoken": "9.0.3",
+    "mongoose": "8.24.5",
+    "nodemailer": "10.0.10",
+    "zod": "4.1.12",
+    "google-auth-library": "^10.0.0"
+  }
+}

@@ -1,0 +1,13 @@
+node_modules/
+.env
+.env.*
+!.env.example
+*.log
+coverage/
+*.pem
+*.key
+*.p12
+node_modules/
+.env
+.env.*
+!.env.example
