@@ -43,47 +43,103 @@ function validated(schema, value) {
   return result.data;
 }
 export function openAIProvider() {
+  return structuredProvider("openai");
+}
+
+export function groqProvider() {
+  return structuredProvider("groq");
+}
+
+export function selectedProvider() {
+  const provider = process.env.AI_PROVIDER?.trim().toLowerCase() || "openai";
+  if (provider === "groq") return groqProvider();
+  if (provider === "openai") return openAIProvider();
+  throw new Error("AI_PROVIDER must be groq or openai");
+}
+
+export function aiRateLimit() {
+  const value = process.env.AI_RATE_LIMIT_PER_MINUTE?.trim() || "8";
+  if (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 120)
+    throw new Error("AI_RATE_LIMIT_PER_MINUTE must be an integer between 1 and 120");
+  return Number(value);
+}
+
+const groqStrictModels = new Set([
+  "openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b",
+]);
+const safeField = (value) =>
+  typeof value === "string" && /^[a-zA-Z0-9_.\[\]-]{1,160}$/.test(value)
+    ? value : undefined;
+function retryAfter(value) {
+  if (!value) return undefined;
+  if (/^\d+$/.test(value) && Number.isSafeInteger(Number(value)))
+    return String(Number(value));
+  // Only accept HTTP dates, not arbitrary strings accepted by Date.parse.
+  if (!/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(value))
+    return undefined;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && timestamp >= Date.now()
+    ? new Date(timestamp).toUTCString() : undefined;
+}
+
+function structuredProvider(provider) {
+  const groq = provider === "groq";
   return {
     configured: () =>
       Boolean(process.env.AI_API_KEY?.trim() && process.env.AI_MODEL?.trim()),
     async generate(name, schema, instructions, data, signal) {
       const started = performance.now();
+      let providerStatus, providerCode, providerRequestId, errorCode;
       try {
-        const response = await fetch("https://api.openai.com/v1/responses", {
+        const model = process.env.AI_MODEL?.trim();
+        if (!process.env.AI_API_KEY?.trim() || !model)
+          throw new ApiError(503, "AI_NOT_CONFIGURED", "CineWave AI thiếu API key hoặc model trên máy chủ.");
+        if (groq && !groqStrictModels.has(model))
+          throw new ApiError(503, "AI_NOT_CONFIGURED", "AI_MODEL của Groq phải hỗ trợ JSON Schema strict: openai/gpt-oss-20b, openai/gpt-oss-120b hoặc qwen/qwen3.8-27b.");
+        const format = { type: "json_schema", name, strict: true, schema: z.toJSONSchema(schema) };
+        const response = await fetch(groq
+          ? "https://api.groq.com/openai/v1/chat/completions"
+          : "https://api.openai.com/v1/responses", {
           method: "POST",
           signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]),
           headers: {
             Authorization: `Bearer ${process.env.AI_API_KEY}`,
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({
-            model: process.env.AI_MODEL,
+          body: JSON.stringify(groq ? {
+            model,
+            max_completion_tokens: 2048,
+            reasoning_effort: "low",
+            messages: [
+              { role: "system", content: instructions },
+              { role: "user", content: JSON.stringify(data) },
+            ],
+            response_format: { type: "json_schema", json_schema: {
+              name: format.name, strict: format.strict, schema: format.schema,
+            } },
+            // Groq Chat Completions does not support store.
+          } : {
+            model,
             store: false,
             max_output_tokens: 1200,
             instructions,
             input: [{ role: "user", content: JSON.stringify(data) }],
-            text: {
-              format: {
-                type: "json_schema",
-                name,
-                strict: true,
-                schema: z.toJSONSchema(schema),
-              },
-            },
+            text: { format },
           }),
         });
+        providerStatus = response.status;
+        providerRequestId = safeField(response.headers.get("x-request-id"));
         let failure;
         if (!response.ok) {
           failure = await response.json().catch(() => null);
-          const safeField = (value) =>
-            typeof value === "string" &&
-            /^[a-zA-Z0-9_.\[\]-]{1,160}$/.test(value)
-              ? value
-              : undefined;
+          providerCode = safeField(failure?.error?.code);
+          providerRequestId ||= safeField(failure?.x_groq?.id);
           aiLog(
             "ai.provider_error",
             {
               stage: name,
+              provider,
+              providerRequestId,
               providerStatus: response.status,
               providerCode: safeField(failure?.error?.code),
               providerType: safeField(failure?.error?.type),
@@ -92,6 +148,9 @@ export function openAIProvider() {
             "error",
           );
         }
+        // Groq spending caps return 400 blocked_api_access; a 429 is a rate limit.
+        if (groq && response.status === 400 && failure?.error?.code === "blocked_api_access")
+          throw new ApiError(503, "AI_QUOTA_EXCEEDED", "Dịch vụ AI đã chạm hạn mức chi tiêu. Quản trị viên cần kiểm tra tài khoản Groq.");
         if (response.status === 429) {
           const quotaCodes = new Set([
             "insufficient_quota",
@@ -102,8 +161,8 @@ export function openAIProvider() {
             "usage_limit_exceeded",
           ]);
           if (
-            quotaCodes.has(failure?.error?.code) ||
-            failure?.error?.type === "insufficient_quota"
+            !groq && (quotaCodes.has(failure?.error?.code) ||
+            failure?.error?.type === "insufficient_quota")
           ) {
             throw new ApiError(
               503,
@@ -111,12 +170,19 @@ export function openAIProvider() {
               "Dịch vụ AI đã hết quota hoặc chạm hạn mức sử dụng. Quản trị viên cần kiểm tra tài khoản API.",
             );
           }
-          throw new ApiError(
+          const error = new ApiError(
             429,
             "AI_PROVIDER_RATE_LIMIT",
             "Nhà cung cấp AI đang giới hạn số yêu cầu. Vui lòng thử lại sau.",
           );
+          error.retryAfter = retryAfter(response.headers.get("retry-after"));
+          throw error;
         }
+        if ([400, 401, 403, 404].includes(response.status))
+          throw new ApiError(503, "AI_NOT_CONFIGURED", "Cấu hình AI key/model, quyền truy cập hoặc JSON Schema không được provider chấp nhận. Quản trị viên cần kiểm tra cấu hình và mã lỗi trong log.");
+        if (response.status === 408 || response.status === 504)
+          throw new ApiError(504, "AI_TIMEOUT", "AI phản hồi quá lâu. Vui lòng thử lại.");
+        if (response.status === 422) throw invalidOutput();
         if (!response.ok)
           throw new ApiError(
             502,
@@ -124,8 +190,22 @@ export function openAIProvider() {
             "Dịch vụ AI chưa sẵn sàng. Vui lòng thử lại sau.",
           );
         const result = await response.json();
-        if (result.status !== "completed") throw invalidOutput();
-        const content = (result.output || []).flatMap((x) => x.content || []);
+        if (!result || typeof result !== "object") throw invalidOutput();
+        providerRequestId ||= safeField(result?.x_groq?.id);
+        if (groq) {
+          const choice = result?.choices?.[0];
+          if (choice?.message?.refusal || choice?.finish_reason === "content_filter")
+            throw new ApiError(422, "AI_REFUSED", "AI không thể trả lời yêu cầu này. Hãy hỏi về phim.");
+          if (choice?.finish_reason !== "stop" || typeof choice.message?.content !== "string")
+            throw invalidOutput();
+          return validated(schema, JSON.parse(choice.message.content));
+        }
+        if (result.status !== "completed" || !Array.isArray(result.output)) throw invalidOutput();
+        if (result.output.some((x) => !x || (x.content !== undefined && !Array.isArray(x.content))))
+          throw invalidOutput();
+        const content = result.output.flatMap((x) => x.content || []);
+        if (content.some((x) => !x || (x.type === "output_text" && typeof x.text !== "string")))
+          throw invalidOutput();
         if (content.some((x) => x.type === "refusal"))
           throw new ApiError(
             422,
@@ -143,6 +223,10 @@ export function openAIProvider() {
         if (!parsed.success) throw invalidOutput();
         return parsed.data;
       } catch (error) {
+        errorCode = error instanceof ApiError ? error.code
+          : signal.aborted || ["TimeoutError", "AbortError"].includes(error.name) ? "AI_TIMEOUT"
+          : error instanceof SyntaxError || error instanceof z.ZodError ? "AI_INVALID_RESPONSE"
+          : "AI_PROVIDER_ERROR";
         if (error instanceof ApiError) throw error;
         if (
           signal.aborted ||
@@ -154,9 +238,15 @@ export function openAIProvider() {
             "AI_TIMEOUT",
             "AI phản hồi quá lâu. Vui lòng thử lại.",
           );
-        throw invalidOutput();
+        if (error instanceof SyntaxError || error instanceof z.ZodError) throw invalidOutput();
+        throw new ApiError(502, "AI_PROVIDER_ERROR", "Không kết nối được nhà cung cấp AI. Vui lòng thử lại sau.");
       } finally {
         aiLog("ai.provider_finished", {
+          provider,
+          providerStatus,
+          providerCode,
+          providerRequestId,
+          errorCode,
           stage: name,
           durationMs: Math.round(performance.now() - started),
         });
@@ -429,14 +519,14 @@ export function aiRoutes(
   secret,
   isDatabaseReady,
   {
-    provider = openAIProvider(),
+    provider = selectedProvider(),
     source = catalog,
     readSignals = personalSignals,
   } = {},
 ) {
   const limit = rateLimit({
     windowMs: 60000,
-    limit: 20,
+    limit: aiRateLimit(),
     standardHeaders: "draft-8",
     legacyHeaders: false,
     message: {
@@ -507,6 +597,10 @@ export function aiRoutes(
         const result = await Promise.race([work(), timeout]);
         aiLog("ai.answer", { movieCount: result.movies.length });
         if (!signal.aborted) res.json(result);
+      } catch (error) {
+        if (!signal.aborted && error instanceof ApiError && error.retryAfter)
+          res.setHeader("Retry-After", error.retryAfter);
+        throw error;
       } finally {
         signal.removeEventListener("abort", onAbort);
         res.removeListener("close", abort);

@@ -23,6 +23,8 @@ export function aiLog(event, fields = {}, level = "info") {
     "durationMs",
     "errorCode",
     "stage",
+    "provider",
+    "providerRequestId",
     "providerStatus",
     "providerCode",
     "providerType",
