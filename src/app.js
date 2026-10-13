@@ -12,6 +12,7 @@ import { emailSender, sendOtp, verifyOtp, googleIdentity } from './identity.js';
 import { authRequestLogger, authLog } from './logging.js';
 import { AVATAR_MAX_BYTES, validateAvatar, avatarStorage } from './avatar.js';
 import { reviewRoutes } from './reviews.js';
+import { aiRoutes } from './ai.js';
 
 const slug = z.string().regex(/^[a-z0-9][a-z0-9-]{0,199}$/);
 const pagination = z.object({ page: z.coerce.number().int().min(1).max(10000).default(1), limit: z.coerce.number().int().min(1).max(64).default(24) });
@@ -19,7 +20,7 @@ const credentials = z.object({ email: z.string().email().max(254).transform(x =>
 const refreshSchema = z.object({ refreshToken: z.string().min(32).max(200) });
 const historyInput = z.object({ server: z.string().min(1).max(200), episode: z.string().min(1).max(200), episodeName: z.string().max(200), positionMs: z.number().int().min(0).max(604800000), durationMs: z.number().int().min(0).max(604800000), watchedAt: z.iso.datetime() }).refine(x => x.durationMs === 0 || x.positionMs <= x.durationMs + 5000);
 const historyDto = h => ({ movie: h.movie, server: h.server, episode: h.episode, episodeName: h.episodeName, positionMs: h.positionMs, durationMs: h.durationMs, completed: h.completed, watchedAt: h.watchedAt });
-export function createApp({ secret, trustProxyHops = 0, isDatabaseReady = () => mongoose.connection.readyState === 1, mailer = emailSender(), verifyGoogle = googleIdentity, avatars = avatarStorage() }) {
+export function createApp({ secret, trustProxyHops = 0, isDatabaseReady = () => mongoose.connection.readyState === 1, mailer = emailSender(), verifyGoogle = googleIdentity, avatars = avatarStorage(), ai }) {
   if (!secret || secret.length < 32) throw new Error('JWT_SECRET must contain at least 32 characters');
   if (!Number.isInteger(trustProxyHops) || trustProxyHops < 0 || trustProxyHops > 5) throw new Error('Invalid TRUST_PROXY_HOPS');
   const app = express();
@@ -35,6 +36,7 @@ export function createApp({ secret, trustProxyHops = 0, isDatabaseReady = () => 
     res.json(await catalog.listing(query));
   }));
   app.get('/api/catalog/movies/:slug', wrap(async (req, res) => res.json(await catalog.detail(slug.parse(req.params.slug)))));
+  aiRoutes(app, secret, isDatabaseReady, ai);
   // Catalog remains accessible while the database is reconnecting.
   app.use('/api', (req, res, next) => isDatabaseReady() ? next() : next(new ApiError(503, 'DATABASE_UNAVAILABLE', 'Máy chủ chưa kết nối được cơ sở dữ liệu. Vui lòng thử lại sau.')));
   const authLimit = rateLimit({ windowMs: 15 * 60000, limit: 15, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: { code: 'AUTH_RATE_LIMIT', message: 'Thử đăng nhập quá nhiều lần. Vui lòng thử lại sau 15 phút.' } } });
