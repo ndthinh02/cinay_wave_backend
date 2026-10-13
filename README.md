@@ -8,6 +8,8 @@ Copy `.env.example` to `.env`, configure `MONGODB_URI` and a private `JWT_SECRET
 
 Configure SMTP for email verification, `GOOGLE_WEB_CLIENT_ID` for Google sign-in (the same Web OAuth client ID as Android), and Cloudinary for avatar uploads. Google tokens are verified using Google's official library. Deploy behind HTTPS; set `NODE_ENV=production` and set `TRUST_PROXY_HOPS` only to the known number of trusted proxy hops.
 
+Proxy configuration defaults to 0 locally and 1 on Render (`RENDER=true`) when `TRUST_PROXY_HOPS` is unset or blank. An explicit value overrides this: if Render currently has `TRUST_PROXY_HOPS=0`, change it to `1` for the nearest proxy or remove the variable, then redeploy. Set the actual trusted hop count if additional proxies are present. Startup logs `server.proxy_config`; AI requests log `ai.result` with HTTP status, error code and a request ID, plus sanitized provider status/code for failed AI calls. These logs never include API keys, prompts, conversation history or personal data.
+
 `GET /api/health` returns 200 when the database is ready, otherwise 503. Catalog remains accessible while MongoDB reconnects; account operations return 503.
 
 Run the existing smoke check against an isolated database whose name contains `smoke`: set `SMOKE_MONGODB_URI=mongodb://127.0.0.1:27017/cinaywave_smoke`, then run `npm run smoke`. External providers are stubbed only in this check.
